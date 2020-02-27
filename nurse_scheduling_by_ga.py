@@ -10,13 +10,16 @@ import xlwings as xw
 
 
 # 従業員人数
-EMPLOYEE_COUNT = 8
+EMPLOYEE_COUNT = 15
 
 # シフトの数
+# 1日4コマ * 日数
 SHIFT_NUM = 28
 
 # 次元数
 DIM = SHIFT_NUM * EMPLOYEE_COUNT
+
+DAY_COUNT = 7
 
 
 
@@ -33,13 +36,13 @@ class Employee(object):
     self.rests = rests
 
   def __str__(self):
-    return '{}: {}'.format(self.no, '/'.join(self.rests))
+    return '{}-{}: {}'.format(self.no, self.name, '/'.join(self.rests))
 
   def is_applicated(self, box_name):
     return (box_name not in self.rests)
 
 # シフトを表すクラス
-# 内部的には SHIFT_NUM * EMPLOYEE_COUNT人 = x次元のタプルで構成される
+# 内部的には SHIFT_NUM * E, four_box_per_dayMPLOYEE_COUNT人 = x次元のタプルで構成される
 class Shift(object):
   # コマの定義
 
@@ -87,7 +90,7 @@ class Shift(object):
     start = 0
     for num in range(EMPLOYEE_COUNT):
       sliced.append(self.list[start:(start + SHIFT_NUM)])
-      start = start + 21
+      start = start + SHIFT_NUM
     return tuple(sliced)
 
   # ユーザ別にアサインコマ名を出力する
@@ -107,12 +110,28 @@ class Shift(object):
   # CSV形式でアサイン結果の出力をする
   def print_csv(self):
     for line in self.slice():
-      print(','.join(map(str, line)))
+      one_count = 0
+      i = 0
 
-  # TSV形式でアサイン結果の出力をする
-  def print_tsv(self):
-    for line in self.slice():
-      print("\t".join(map(str, line)))
+      for box in line:
+        if i ==  4:
+          one_count = 0
+          i = 0
+
+        if box == 1:
+          one_count += 1
+
+        if i % 4 == 0: 
+          print("\033[32m{},\033[0m".format(box), end='')
+        else:
+          print("{},".format(box), end='')
+
+        if one_count == 2:
+          print("\033[31m!\033[0m", end='')
+                
+        i += 1
+      print()
+
 
   # ユーザ番号を指定してコマ名を取得する
   def get_boxes_by_user(self, user_no):
@@ -194,14 +213,59 @@ class Shift(object):
     result = []
     for user_no in range(EMPLOYEE_COUNT):
       boxes = self.get_boxes_by_user(user_no)
-      wdays = []
+      days = []
       for box in boxes:
-        wdays.append(box.split('_')[0])
-      wday_names = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']
-      for wday_name in wday_names:
-        if wdays.count(wday_name) == 3:
-          result.append(wday_name)
+        days.append(box.split('_')[0])
+      # month1, month2 ..., month7
+      day_names = ['month' + str(i) for i in range(DAY_COUNT)]
+      for day_name in day_names:
+        if days.count(day_name) > 1:
+          result.append(day_name)
     return result
+
+  # 1日1人4コマの日を返却
+  def calc_shift_avg(self):
+    result = []
+    user_shifts = []
+    for user_no in range(EMPLOYEE_COUNT):
+      boxes = self.get_boxes_by_user(user_no)
+      shifts = []
+      for box in boxes:
+        # d, d8, d11, n
+        shifts.append(box.split('_')[1])
+
+      # d, d8, d11, n
+      shift_counts = [0, 0, 0, 0]
+      for shift in shifts:
+        if shift == 'd':
+          shift_counts[0] += 1
+        elif shift == 'd8':
+          shift_counts[1] += 1
+        elif shift == 'd11':
+          shift_counts[2] += 1
+        elif shift == 'n':
+          shift_counts[3] += 1
+
+      user_shifts.append(shift_counts)
+      sum_shift = [0, 0, 0, 0]
+      for user_shift in user_shifts:
+        sum_shift[0] += user_shift[0]
+        sum_shift[1] += user_shift[1]
+        sum_shift[2] += user_shift[2]
+        sum_shift[3] += user_shift[3]
+
+      avg_shift = []
+      for i in range(4):
+        avg_shift.append(sum_shift[i] / DAY_COUNT)
+
+      gosa = 0
+      for user_shift in user_shifts:
+        gosa += abs(user_shift[0] - avg_shift[0])
+        gosa += abs(user_shift[1] - avg_shift[1])
+        gosa += abs(user_shift[2] - avg_shift[2])
+        gosa += abs(user_shift[3] - avg_shift[3])
+
+    return gosa
 
   @classmethod
   def make_shift_day(self, num):
@@ -221,7 +285,7 @@ for i in range(EMPLOYEE_COUNT):
     employee_id = int(sht6.range('B' + str(i + 4)).value)
     employees_dict[employee_id] = Employee(employee_id, employee_name, 0, False, [])
 
-for i in range(7):
+for i in range(DAY_COUNT):
   id1 = int(sht5.range('G' + str(i + 6)).value)
   id2 = int(sht5.range('H' + str(i + 6)).value)
   employees_dict[id1].rests.extend(Shift.make_shift_day(i+1))
@@ -235,7 +299,7 @@ for k, v in employees_dict.items():
 employees = list(employees_dict.values())
 
 
-creator.create("FitnessPeopleCount", base.Fitness, weights=(-100.0, -100.0))
+creator.create("FitnessPeopleCount", base.Fitness, weights=(-100.0, -100.0, -200.0, -10.0))
 creator.create("Individual", list, fitness=creator.FitnessPeopleCount)
 
 toolbox = base.Toolbox()
@@ -254,9 +318,14 @@ def evalShift(individual):
   people_count_sub_sum = 1.0 * sum(s.abs_people_between_need_and_actual()) / DIM
 
   # 応募していない時間帯へのアサイン数
-  not_applicated_count = s.not_applicated_assign() / 1.0 * DIM
+  not_applicated_count = s.not_applicated_assign() / (1.0 * DIM)
 
-  return (people_count_sub_sum, not_applicated_count)
+  # 1日に2コマ以上アサインしている
+  four_box_per_day = len(s.four_box_per_day()) / (EMPLOYEE_COUNT * DAY_COUNT)
+
+  shift_avg = s.calc_shift_avg() / (EMPLOYEE_COUNT * DAY_COUNT * 4)
+
+  return (people_count_sub_sum, not_applicated_count, four_box_per_day, shift_avg)
 
 toolbox.register("evaluate", evalShift)
 # 交叉関数を定義(二点交叉)
@@ -277,7 +346,7 @@ if __name__ == '__main__':
 
     # 初期集団を生成する
     pop = toolbox.population(n=300)
-    CXPB, MUTPB, NGEN = 0.6, 0.5, 100 # 交差確率、突然変異確率、進化計算のループ回数
+    CXPB, MUTPB, NGEN = 0.6, 0.5, 500 # 交差確率、突然変異確率、進化計算のループ回数
 
     print("進化開始")
 
@@ -350,4 +419,3 @@ if __name__ == '__main__':
     print("最も優れていた個体: %s, %s" % (best_ind, best_ind.fitness.values))
     s = Shift(best_ind)
     s.print_csv()
-    s.print_tsv()
